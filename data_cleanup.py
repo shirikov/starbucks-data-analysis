@@ -1,11 +1,6 @@
 import pandas as pd
 import numpy as np
 
-import os
-os.chdir('Box Sync')
-os.chdir('Udacity DS Nanodegree')
-os.chdir('Starbucks')
-
 # read in the json files
 portfolio = pd.read_json('data/portfolio.json', orient='records', lines=True)
 profile = pd.read_json('data/profile.json', orient='records', lines=True)
@@ -17,8 +12,11 @@ portfolio = portfolio.rename(columns={'id': 'offer_id',
                                       'reward': 'offer_reward'})
 portfolio['offer_duration_hours'] = portfolio['offer_duration']*24
 
-profile_cleaned = profile.dropna(subset=['gender', 'age']).rename(
+# drop users with missing gender and income
+profile_cleaned = profile.dropna(subset=['gender', 'income']).rename(
     columns={'id': 'user_id'})
+
+# clarify the gender variable
 gender_sub = {'F': 'Female', 'M': 'Male', 'O': 'Other'}
 profile_cleaned['gender'] = profile_cleaned['gender'].apply(
     lambda x: ' '.join([gender_sub.get(i, i) for i in x.split()]))
@@ -31,25 +29,42 @@ transcript['offer_id'].fillna(transcript['offer id'], inplace=True)
 transcript = transcript.drop(columns=['offer id', 'value'])
 
 # create user-offer data set
-# drop records for users without demographic data
+# drop records for users without demographic data 
+# and records for transactions (not related to offers directly)
 transcript_u = transcript[
     transcript.person.isin(profile_cleaned.user_id)
-    ].sort_values(by=['person', 'time']).rename(columns={'person': 'user_id'})
+    ].sort_values(by=['person', 'time']).rename(
+        columns={'person': 'user_id'}).dropna(subset=['offer_id'])
 
 def get_offer_data(user_data, offer, time_received, current_offer_duration):
     
+    '''
+    Extract data on a given offer received by a particular user:
+    whether and when the offer was viewed and/or completed
+    
+    Args:
+        user_data: a subset of transactions for the specific user
+        offer: specific offer id
+        time_received: time at which the offer was sent
+        current_offer_duration: the duration of the specific offer in hours
+        
+    Returns: data frame with information on the reception, viewing,
+    and completion of a particular offer by a particular user
+    '''
+    
+    # limit transactions to the period in which the offer was active
     offer_data = user_data[
         (user_data.time >= time_received) &
         (user_data.time <= time_received + current_offer_duration) &
         (user_data.offer_id == offer)]
     
-    # check whether the offer was completed/redeemed
+    # check whether the offer was completed/redeemed in that period
     offer_completed = int('offer completed' in offer_data.event.tolist())
     
-    # check whether the offer was viewed
+    # check whether the offer was viewed in that period
     offer_viewed = int('offer viewed' in offer_data.event.tolist())
-        
-    # check whether the offer was completed before/without viewing it
+    
+    # capture when the offer was completed/viewed
     if offer_completed == 1:
         time_completed = offer_data[
             offer_data.event == 'offer completed'].time.iloc[0]
@@ -62,6 +77,7 @@ def get_offer_data(user_data, offer, time_received, current_offer_duration):
     else:
         time_viewed = np.nan
         
+    # check whether the offer was completed before viewing it
     if offer_completed == 1 & offer_viewed == 1:
         if time_completed < time_viewed:
             offer_viewed_before = 0
@@ -72,7 +88,8 @@ def get_offer_data(user_data, offer, time_received, current_offer_duration):
     # set to nan if offer not completed
     else:
         offer_viewed_before = np.nan
-                
+    
+    # combine everything into a data frame            
     user_offer_data = pd.DataFrame(
         {'user_id': offer_data.user_id.unique().tolist(),
          'offer_id': [offer],
@@ -89,6 +106,19 @@ def get_offer_data(user_data, offer, time_received, current_offer_duration):
 
 def check_user_offers(user_data, offer):
     
+    '''
+    Check how many times a given offer was received by a particular user
+    and extract data on offer viewing/completion
+    
+    Args:
+        user_data: a subset of transactions for the specific user
+        offer: specific offer id
+        
+    Returns: data frame with information on the reception, viewing,
+    and completion of all offers with a particular id by a particular user
+    '''
+
+    # extract the duration of the offer in hours from offer metadata
     current_offer_duration = portfolio[
         portfolio.offer_id == offer].offer_duration_hours.item()
     
@@ -102,6 +132,8 @@ def check_user_offers(user_data, offer):
                                       current_offer_duration) for
                        time_point in received_times]
     user_offer_data = pd.concat(user_offer_data)
+    
+    # how many times the same offer was received 
     user_offer_data['offer_count'] = len(received_times)
     user_offer_data['time_points'] = '.'.join(str(x) for x in received_times)
         
@@ -110,18 +142,43 @@ def check_user_offers(user_data, offer):
 
 def clean_offers_by_user(user):
     
+    '''
+    Get data on all offers received by a particular user
+    
+    Args:
+        user: user id
+        
+    Returns: data frame with information on the reception, viewing,
+    and completion of all offers received by a particular user
+    '''
+
+    # a data set of all records on offers received, viewed, or completed
+    # by a particular user
     user_transactions = transcript_u[transcript_u.user_id == user]
+    
+    # the ids of all offers received by the user
     user_offers = user_transactions.offer_id.unique().tolist()
     
+    # extract data on all offers received by this user
     user_offer_data = [check_user_offers(user_transactions, offer) for 
                        offer in user_offers]
     user_offer_data = pd.concat(user_offer_data)
     
     return user_offer_data
-        
+
+# create the user-offer data frame
 offers_by_user = [clean_offers_by_user(user) for user in 
                   transcript_u.user_id.unique().tolist()]
 offers_by_user = pd.concat(offers_by_user)
+
+# check how quickly offers were viewed/completed        
+offers_by_user['time_to_completion'] = offers_by_user[
+    'time_completed'] - offers_by_user['time_received']
+offers_by_user['time_to_viewing'] = offers_by_user[
+    'time_viewed'] - offers_by_user['time_received']
+offers_by_user[['time_to_completion', 'time_to_viewing']].hist(bins=100)
+offers_by_user = offers_by_user.drop(columns=['time_to_completion',
+                                              'time_to_viewing'])
 
 # calculate the number of offers completed by the same user
 # before receiving the current offer
